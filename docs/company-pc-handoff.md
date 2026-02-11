@@ -15,7 +15,7 @@
 ## リポジトリ取得
 
 ```powershell
-git clone https://github.com/{org}/excel-deep-inspector.git
+git clone https://github.com/Tenormusica2024/excel-deep-inspector.git
 cd excel-deep-inspector
 ```
 
