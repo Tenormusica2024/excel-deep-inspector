@@ -1,0 +1,28 @@
+# Excel files (binary, large)
+*.xlsm
+*.xlsx
+*.xls
+
+# Generated analysis packages
+*_analysis_package/
+
+# Generated screenshots
+*_screenshots/
+
+# Test output images
+*.png
+
+# Encoding fix utility (dev-only)
+_fix_encoding.ps1
+
+# PowerShell temp files
+*.tmp
+*~
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
