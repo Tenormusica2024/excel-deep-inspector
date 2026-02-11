@@ -112,6 +112,12 @@ function Get-ProcedureBoundaries {
         }
     }
 
+    # 閉じられなかったプロシージャの救済（End Sub なしの破損VBA対応）
+    if ($null -ne $currentProc) {
+        $currentProc.EndLine = $Lines.Count  # ファイル末尾を終端とする
+        $boundaries += [PSCustomObject]$currentProc
+    }
+
     return ,$boundaries
 }
 
@@ -800,8 +806,8 @@ function Extract-FormCalls {
         # FormXxx.Show / Load FormXxx
         if ($trimmed -match '(?:(?<form>\w+)\.Show|Load\s+(?<form2>\w+))') {
             $formName = if ($Matches['form']) { $Matches['form'] } else { $Matches['form2'] }
-            # Formで始まる名前、またはufrmで始まる名前をフォームとして判定
-            if ($formName -match '^(Form|ufrm|frm|frmMain)') {
+            # フォーム名判定: Form+大文字開始 / ufrm+大文字 / frm+大文字（FormatCells等の誤マッチ防止）
+            if ($formName -match '^(Form[A-Z]|ufrm[A-Z]|frm[A-Z])') {
                 $proc = Get-ProcedureAtLine -Boundaries $ProcBoundaries -LineNumber $lineNum
                 $procName = if ($null -ne $proc) { $proc.Name } else { "(module-level)" }
 
@@ -1006,14 +1012,15 @@ function Invoke-VBAAnalysis {
                     ProcedureAccess = @()
                 }
             }
-            # プロシージャ+アクセスタイプのペアで重複排除
-            $pairKey = "$($col.Procedure)|$($col.AccessType)"
+            # モジュール+プロシージャ+アクセスタイプのトリプルで重複排除
+            $pairKey = "$($col.Module)|$($col.Procedure)|$($col.AccessType)"
             $pairExists = $false
             foreach ($pa in $columnSummary[$cn].ProcedureAccess) {
-                if ("$($pa.Procedure)|$($pa.AccessType)" -eq $pairKey) { $pairExists = $true; break }
+                if ("$($pa.Module)|$($pa.Procedure)|$($pa.AccessType)" -eq $pairKey) { $pairExists = $true; break }
             }
             if (-not $pairExists) {
                 $columnSummary[$cn].ProcedureAccess += @{
+                    Module     = $col.Module
                     Procedure  = $col.Procedure
                     AccessType = $col.AccessType
                 }
@@ -1035,6 +1042,7 @@ function Invoke-VBAAnalysis {
             $paArr = @()
             foreach ($pa in $cs.ProcedureAccess) {
                 $paArr += [PSCustomObject]@{
+                    Module     = $pa.Module
                     Procedure  = $pa.Procedure
                     AccessType = $pa.AccessType
                 }

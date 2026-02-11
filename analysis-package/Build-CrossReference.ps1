@@ -101,12 +101,12 @@ function Get-ProcedureImpact {
         }
     }
 
-    # このプロシージャ内のテーブル列アクセス（ProcedureAccessから個別のAccessType取得）
+    # このプロシージャ内のテーブル列アクセス（Module+Procedureで正確にフィルタ）
     $tableCols = @()
     foreach ($table in @($tableRefs.Tables)) {
         foreach ($col in @($table.ColumnsAccessed)) {
             foreach ($pa in @($col.ProcedureAccess)) {
-                if ($pa.Procedure -eq $Procedure) {
+                if ($pa.Module -eq $Module -and $pa.Procedure -eq $Procedure) {
                     $tableCols += [PSCustomObject]@{
                         TableName  = $table.TableName
                         ColumnName = $col.ColumnName
@@ -137,7 +137,7 @@ function Convert-ImpactToCellsArray {
     <# Impactのセル参照を出力用フォーマットに変換 #>
     param($Impact)
     $result = @()
-    if (-not $Impact) { return $result }
+    if (-not $Impact) { return ,$result }
     foreach ($cell in @($Impact.CellsAffected)) {
         $result += [PSCustomObject]@{
             Address    = $cell.RawAddress
@@ -145,14 +145,14 @@ function Convert-ImpactToCellsArray {
             AccessType = $cell.AccessType
         }
     }
-    return $result
+    return ,$result
 }
 
 function Convert-ImpactToTablesArray {
     <# Impactのテーブル参照を出力用フォーマットに変換 #>
     param($Impact)
     $result = @()
-    if (-not $Impact) { return $result }
+    if (-not $Impact) { return ,$result }
     foreach ($tbl in @($Impact.TablesAffected)) {
         $result += [PSCustomObject]@{
             Table      = $tbl.TableName
@@ -160,18 +160,18 @@ function Convert-ImpactToTablesArray {
             AccessType = $tbl.AccessType
         }
     }
-    return $result
+    return ,$result
 }
 
 function Convert-ImpactToFormsArray {
     <# Impactのフォーム呼び出しからFormName配列を取得 #>
     param($Impact)
     $result = @()
-    if (-not $Impact) { return $result }
+    if (-not $Impact) { return ,$result }
     foreach ($fc in @($Impact.FormsTriggered)) {
         if ($fc.FormName -and $fc.FormName -notin $result) { $result += $fc.FormName }
     }
-    return $result
+    return ,$result
 }
 
 function Build-FormSubChains {
@@ -529,15 +529,16 @@ foreach ($table in @($tableRefs.Tables)) {
         # (ListRows.Count)はメタ操作なのでスキップ
         if ($col.ColumnName -eq "(ListRows.Count)") { continue }
 
-        # ProcedureAccessからプロシージャ単位でRead/Write分類
+        # ProcedureAccessからプロシージャ単位でRead/Write分類（Module.Procedure形式）
         $writers = @()
         $readers = @()
         foreach ($pa in @($col.ProcedureAccess)) {
+            $qualifiedName = if ($pa.Module) { "$($pa.Module).$($pa.Procedure)" } else { $pa.Procedure }
             if ($pa.AccessType -eq "Write") {
-                $writers += $pa.Procedure
+                $writers += $qualifiedName
             }
             if ($pa.AccessType -eq "Read") {
-                $readers += $pa.Procedure
+                $readers += $qualifiedName
             }
         }
 
