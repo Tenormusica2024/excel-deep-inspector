@@ -101,16 +101,18 @@ function Get-ProcedureImpact {
         }
     }
 
-    # このプロシージャ内のテーブル列アクセス
+    # このプロシージャ内のテーブル列アクセス（ProcedureAccessから個別のAccessType取得）
     $tableCols = @()
     foreach ($table in @($tableRefs.Tables)) {
         foreach ($col in @($table.ColumnsAccessed)) {
-            # Proceduresプロパティにプロシージャ名が含まれるか
-            if (@($col.Procedures) -contains $Procedure) {
-                $tableCols += [PSCustomObject]@{
-                    TableName  = $table.TableName
-                    ColumnName = $col.ColumnName
-                    AccessType = $col.AccessType
+            foreach ($pa in @($col.ProcedureAccess)) {
+                if ($pa.Procedure -eq $Procedure) {
+                    $tableCols += [PSCustomObject]@{
+                        TableName  = $table.TableName
+                        ColumnName = $col.ColumnName
+                        AccessType = $pa.AccessType
+                    }
+                    break
                 }
             }
         }
@@ -318,10 +320,11 @@ foreach ($axEvt in $activexEvents) {
         }
     }
 
-    # 事前計算
-    $cellsArr  = @(Convert-ImpactToCellsArray -Impact $impact)
-    $tablesArr = @(Convert-ImpactToTablesArray -Impact $impact)
-    $formsArr  = @(Convert-ImpactToFormsArray -Impact $impact)
+    # 事前計算（SubChains展開含む）
+    $cellsArr     = @(Convert-ImpactToCellsArray -Impact $impact)
+    $tablesArr    = @(Convert-ImpactToTablesArray -Impact $impact)
+    $formsArr     = @(Convert-ImpactToFormsArray -Impact $impact)
+    $subChainsArr = @(Build-FormSubChains -Impact $impact)
 
     # TriggerSourceの値を事前計算（if/elseをPSCustomObject外に）
     $triggerSheet = $axEvt.SheetDisplayName
@@ -349,7 +352,7 @@ foreach ($axEvt in $activexEvents) {
         CellsAffected  = $cellsArr
         TablesAffected  = $tablesArr
         FormsTriggered  = $formsArr
-        SubChains       = @()
+        SubChains       = $subChainsArr
     }
 }
 
@@ -363,10 +366,11 @@ foreach ($wsEvt in $wsEvents) {
     $chainId++
     $impact = Get-ProcedureImpact -Module $wsEvt.Module -Procedure $wsEvt.ProcedureName
 
-    # 事前計算
-    $cellsArr  = @(Convert-ImpactToCellsArray -Impact $impact)
-    $tablesArr = @(Convert-ImpactToTablesArray -Impact $impact)
-    $formsArr  = @(Convert-ImpactToFormsArray -Impact $impact)
+    # 事前計算（SubChains展開含む）
+    $cellsArr     = @(Convert-ImpactToCellsArray -Impact $impact)
+    $tablesArr    = @(Convert-ImpactToTablesArray -Impact $impact)
+    $formsArr     = @(Convert-ImpactToFormsArray -Impact $impact)
+    $subChainsArr = @(Build-FormSubChains -Impact $impact)
 
     $chains += [PSCustomObject]@{
         Id            = "chain_{0:D3}" -f $chainId
@@ -385,7 +389,43 @@ foreach ($wsEvt in $wsEvents) {
         CellsAffected  = $cellsArr
         TablesAffected  = $tablesArr
         FormsTriggered  = $formsArr
-        SubChains       = @()
+        SubChains       = $subChainsArr
+    }
+}
+
+# --- ソース3b: ワークブックイベント ---
+$wbEvents = @()
+foreach ($evt in @($eventTriggers.Events)) {
+    if ($evt.Type -eq "WORKBOOK_EVENT") { $wbEvents += $evt }
+}
+
+foreach ($wbEvt in $wbEvents) {
+    $chainId++
+    $impact = Get-ProcedureImpact -Module $wbEvt.Module -Procedure $wbEvt.ProcedureName
+
+    # 事前計算
+    $cellsArr     = @(Convert-ImpactToCellsArray -Impact $impact)
+    $tablesArr    = @(Convert-ImpactToTablesArray -Impact $impact)
+    $formsArr     = @(Convert-ImpactToFormsArray -Impact $impact)
+    $subChainsArr = @(Build-FormSubChains -Impact $impact)
+
+    $chains += [PSCustomObject]@{
+        Id            = "chain_{0:D3}" -f $chainId
+        TriggerType   = "Workbook_Event"
+        TriggerSource = [PSCustomObject]@{
+            EventName   = $wbEvt.EventName
+            SheetModule = $wbEvt.Module
+        }
+        EntryPoint    = [PSCustomObject]@{
+            Module    = $wbEvt.Module
+            Procedure = $wbEvt.ProcedureName
+            Line      = $wbEvt.Line
+        }
+        Description    = $wbEvt.Description
+        CellsAffected  = $cellsArr
+        TablesAffected  = $tablesArr
+        FormsTriggered  = $formsArr
+        SubChains       = $subChainsArr
     }
 }
 
@@ -446,12 +486,14 @@ if ($procedures) {
 $countFormControl = 0
 $countActiveX     = 0
 $countWsEvent     = 0
+$countWbEvent     = 0
 $countUnmapped    = 0
 foreach ($ch in @($chains)) {
     switch ($ch.TriggerType) {
         "FormControl_OnAction" { $countFormControl++ }
         "ActiveX_Event"        { $countActiveX++ }
         "Worksheet_Event"      { $countWsEvent++ }
+        "Workbook_Event"       { $countWbEvent++ }
         "PublicSub_Unmapped"   { $countUnmapped++ }
     }
 }
@@ -462,6 +504,7 @@ $uiToVbaOutput = [PSCustomObject]@{
         FormControl_OnAction = $countFormControl
         ActiveX_Event        = $countActiveX
         Worksheet_Event      = $countWsEvent
+        Workbook_Event       = $countWbEvent
         PublicSub_Unmapped   = $countUnmapped
     }
     Chains = @($chains)
@@ -486,15 +529,15 @@ foreach ($table in @($tableRefs.Tables)) {
         # (ListRows.Count)はメタ操作なのでスキップ
         if ($col.ColumnName -eq "(ListRows.Count)") { continue }
 
-        # Writers/Readersをプロシージャ名リストから分類
+        # ProcedureAccessからプロシージャ単位でRead/Write分類
         $writers = @()
         $readers = @()
-        foreach ($procName in @($col.Procedures)) {
-            if ($col.AccessType -match "Write") {
-                $writers += $procName
+        foreach ($pa in @($col.ProcedureAccess)) {
+            if ($pa.AccessType -eq "Write") {
+                $writers += $pa.Procedure
             }
-            if ($col.AccessType -match "Read") {
-                $readers += $procName
+            if ($pa.AccessType -eq "Read") {
+                $readers += $pa.Procedure
             }
         }
 

@@ -199,6 +199,7 @@ function Extract-SubProcedures {
 # ============================================================
 $excel = $null
 $wb = $null
+$sheetCodeNames = @()
 
 try {
     Write-Host "[1/6] Excel COM starting..." -ForegroundColor Yellow
@@ -642,7 +643,21 @@ if ($basFiles.Count -gt 0) {
     if (Test-Path $parseScript) {
         Write-Host "[v2-1] Running Parse-VBAModules.ps1..." -ForegroundColor Yellow
         try {
-            & $parseScript -InputDir $dirs.VBA -OutputDir $dirs.V2Output
+            # SheetCodeNameMapを構築（COM抽出結果から）
+            $sheetCodeNameHashtable = @{}
+            foreach ($sc in $sheetCodeNames) {
+                if ($sc.CodeName) {
+                    $sheetCodeNameHashtable[$sc.CodeName] = $sc.DisplayName
+                }
+            }
+            $parseParams = @{
+                InputDir  = $dirs.VBA
+                OutputDir = $dirs.V2Output
+            }
+            if ($sheetCodeNameHashtable.Count -gt 0) {
+                $parseParams.SheetCodeNameMap = $sheetCodeNameHashtable
+            }
+            & $parseScript @parseParams
         }
         catch {
             Write-Host "[WARN] Parse-VBAModules.ps1 failed: $($_.Exception.Message)" -ForegroundColor Yellow

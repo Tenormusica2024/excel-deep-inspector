@@ -90,8 +90,11 @@ function Get-ProcedureBoundaries {
         $line = $Lines[$i]
         $trimmed = $line.TrimStart()
 
-        # Sub/Function/Property宣言の検出
-        if ($trimmed -match '^(Public\s+|Private\s+|Friend\s+)?(Static\s+)?(Sub|Function|Property\s+(?:Get|Let|Set))\s+(\w+)\s*\(') {
+        # コメント行はスキップ（' End Sub 等の誤検出防止）
+        if ($trimmed.StartsWith("'") -or $trimmed.StartsWith("Rem ")) { continue }
+
+        # Sub/Function/Property宣言の検出（括弧なし Sub Foo も捕捉）
+        if ($trimmed -match '^(Public\s+|Private\s+|Friend\s+)?(Static\s+)?(Sub|Function|Property\s+(?:Get|Let|Set))\s+(\w+)') {
             $currentProc = @{
                 Access    = if ($Matches[1]) { $Matches[1].Trim() } else { "Public" }
                 Type      = $Matches[3].Trim()
@@ -391,6 +394,16 @@ function Extract-CellReferencesV2 {
             $sheetCellsPattern = '(?<prefix>' + ($sheetPrefixes -join '|') + ')\.Cells\(\s*(?<row>[^,]+?)\s*,\s*(?<col>[^)]+?)\s*\)'
             $scMatches = [regex]::Matches($line, $sheetCellsPattern)
             foreach ($m in $scMatches) {
+                # 重複チェック: この位置が上位パターンの一部として既にマッチされていないか
+                $alreadyMatched = $false
+                foreach ($pos in $matchedPositions.Keys) {
+                    if ($m.Index -ge $pos -and $m.Index -lt ($pos + $matchedPositions[$pos])) {
+                        $alreadyMatched = $true
+                        break
+                    }
+                }
+                if ($alreadyMatched) { continue }
+
                 $refId++
                 $prefix = $m.Groups['prefix'].Value
                 $row = $m.Groups['row'].Value.Trim()
@@ -826,7 +839,7 @@ function Invoke-VBAAnalysis {
     Write-Host ""
 
     # .basファイルを収集
-    $basFiles = Get-ChildItem -Path $InputDir -Filter "*.bas" -File
+    $basFiles = @(Get-ChildItem -Path $InputDir -Filter "*.bas" -File)
     if ($basFiles.Count -eq 0) {
         Write-Warning ".basファイルが見つかりません: $InputDir"
         return
@@ -839,7 +852,7 @@ function Invoke-VBAAnalysis {
     $codeNameToDisplay = @{}
 
     foreach ($file in $basFiles) {
-        $content = Get-Content -Path $file.FullName -Encoding UTF8
+        $content = @(Get-Content -Path $file.FullName -Encoding UTF8)
         $header = Parse-ModuleHeader -Lines $content
 
         if (-not $header.ModuleName) {
@@ -867,6 +880,23 @@ function Invoke-VBAAnalysis {
         # 自動推定: Document型モジュール名をそのままキーとして登録（DisplayNameはnull）
         foreach ($cn in $knownSheetCodeNames) {
             $codeNameToDisplay[$cn] = $null
+        }
+    }
+
+    # sheet_codenames.jsonが存在すれば読み込み（Generate-AnalysisPackage.ps1統合実行時に生成済み）
+    if (-not $SheetCodeNameMap) {
+        $sheetCodeNamesPath = Join-Path $OutputDir "sheet_codenames.json"
+        if (Test-Path $sheetCodeNamesPath) {
+            $scJson = Get-Content -Path $sheetCodeNamesPath -Encoding UTF8 -Raw | ConvertFrom-Json
+            foreach ($sc in @($scJson.SheetCodeNames)) {
+                if ($sc.CodeName -and $sc.DisplayName) {
+                    $codeNameToDisplay[$sc.CodeName] = $sc.DisplayName
+                    if ($sc.CodeName -notin $knownSheetCodeNames) {
+                        $knownSheetCodeNames += $sc.CodeName
+                    }
+                }
+            }
+            Write-Host "Loaded sheet_codenames.json: $(@($scJson.SheetCodeNames).Count) sheets" -ForegroundColor Green
         }
     }
 
@@ -966,38 +996,60 @@ function Invoke-VBAAnalysis {
         $tBindings = @($allTableBindings | Where-Object { $_.TableName -eq $tName })
         $tColumns = @($allColumnAccesses | Where-Object { $_.TableName -eq $tName })
 
-        # 列ごとのアクセス集約
+        # 列ごとのアクセス集約（プロシージャ単位でRead/Write区別）
         $columnSummary = @{}
         foreach ($col in $tColumns) {
             $cn = $col.ColumnName
             if (-not $columnSummary.ContainsKey($cn)) {
                 $columnSummary[$cn] = @{
-                    ColumnName = $cn
-                    AccessTypes = @()
-                    Procedures = @()
+                    ColumnName      = $cn
+                    ProcedureAccess = @()
                 }
             }
-            if ($col.AccessType -notin $columnSummary[$cn].AccessTypes) {
-                $columnSummary[$cn].AccessTypes += $col.AccessType
+            # プロシージャ+アクセスタイプのペアで重複排除
+            $pairKey = "$($col.Procedure)|$($col.AccessType)"
+            $pairExists = $false
+            foreach ($pa in $columnSummary[$cn].ProcedureAccess) {
+                if ("$($pa.Procedure)|$($pa.AccessType)" -eq $pairKey) { $pairExists = $true; break }
             }
-            if ($col.Procedure -notin $columnSummary[$cn].Procedures) {
-                $columnSummary[$cn].Procedures += $col.Procedure
+            if (-not $pairExists) {
+                $columnSummary[$cn].ProcedureAccess += @{
+                    Procedure  = $col.Procedure
+                    AccessType = $col.AccessType
+                }
             }
         }
 
         $sheetInfo = $allTableToSheet[$tName]
+        # PSCustomObject外で事前計算（PS5.1パーサー制約回避）
+        $shCodeName = $null
+        $shDisplayName = $null
+        if ($sheetInfo) {
+            $shCodeName = $sheetInfo.CodeName
+            $shDisplayName = $sheetInfo.DisplayName
+        }
+        $boundInArr = @($tBindings | Select-Object Module, Procedure, Line, Variable, Context)
+        # ColumnsAccessedをforeachで構築（ForEach-Object {} 回避）
+        $colArr = @()
+        foreach ($cs in $columnSummary.Values) {
+            $paArr = @()
+            foreach ($pa in $cs.ProcedureAccess) {
+                $paArr += [PSCustomObject]@{
+                    Procedure  = $pa.Procedure
+                    AccessType = $pa.AccessType
+                }
+            }
+            $colArr += [PSCustomObject]@{
+                ColumnName      = $cs.ColumnName
+                ProcedureAccess = @($paArr)
+            }
+        }
         $tableOutput += [PSCustomObject]@{
             TableName        = $tName
-            SheetCodeName    = if ($sheetInfo) { $sheetInfo.CodeName } else { $null }
-            SheetDisplayName = if ($sheetInfo) { $sheetInfo.DisplayName } else { $null }
-            BoundIn          = @($tBindings | Select-Object Module, Procedure, Line, Variable, Context)
-            ColumnsAccessed  = @($columnSummary.Values | ForEach-Object {
-                [PSCustomObject]@{
-                    ColumnName  = $_.ColumnName
-                    AccessType  = ($_.AccessTypes -join "/")
-                    Procedures  = $_.Procedures
-                }
-            })
+            SheetCodeName    = $shCodeName
+            SheetDisplayName = $shDisplayName
+            BoundIn          = $boundInArr
+            ColumnsAccessed  = @($colArr)
         }
     }
     $uniqueColCount = @($allColumnAccesses | Select-Object -Property ColumnName -Unique).Count
